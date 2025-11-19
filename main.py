@@ -184,7 +184,7 @@ def train_validate(run_overrides=None, run_tag=""):
         except Exception:
             pass
 
-    for epoch in range(local_epochs):
+    for epoch in range(1, local_epochs + 1):
         for phase in ["train", "valid"]:
             if phase == "train":
                 model.train()
