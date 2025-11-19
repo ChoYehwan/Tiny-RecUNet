@@ -106,7 +106,6 @@ def postprocess_per_volume(
         index += num_slices[p]
     return volumes
 
-
 def log_loss_summary(loss, step, prefix=""):
     print("epoch {} | {}: {}".format(step + 1, prefix + "loss", np.mean(loss)))
 

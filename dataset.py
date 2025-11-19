@@ -9,7 +9,14 @@ from torchvision.transforms import Compose
 import random
 
 class BrainSegmentationDataset(Dataset):
-    """Brain MRI dataset for FLAIR abnormality segmentation"""
+    """Brain MRI dataset for FLAIR abnormality segmentation
+
+    Uses a single global seed to deterministically shuffle patients and assign
+    validation / test / train splits as ordered slices of the shuffled list:
+        shuffled[:val_count] -> validation
+        shuffled[val_count:val_count+test_count] -> test
+        remaining -> train
+    """
     def __init__(
         self,
         images_dir,
@@ -18,8 +25,12 @@ class BrainSegmentationDataset(Dataset):
         subset="train",
         random_sampling=True,
         seed=42,
+        # split controls (counts + global seed)
+        val_count: int = 10,
+        test_count: int = 10,
+        global_seed: int = 42,
     ):
-        assert subset in ["all", "train", "validation"]
+        assert subset in ["all", "train", "validation", "test"]
 
         # read images
         volumes = {}
@@ -55,16 +66,22 @@ class BrainSegmentationDataset(Dataset):
 
         self.patients = sorted(volumes)
 
-        # select cases to subset
-        if not subset == "all":
-            random.seed(seed)
-            validation_patients = random.sample(self.patients, k=10)
+        # select cases to subset (deterministic split with single global seed)
+        if subset != "all":
+            rng = random.Random(global_seed)
+            shuffled = list(self.patients)
+            rng.shuffle(shuffled)
+            k_val = min(max(val_count, 0), len(shuffled))
+            k_test = min(max(test_count, 0), max(0, len(shuffled) - k_val))
+            validation_patients = shuffled[:k_val]
+            test_patients = shuffled[k_val:k_val + k_test]
+            train_patients = shuffled[k_val + k_test:]
             if subset == "validation":
-                self.patients = validation_patients
-            else:
-                self.patients = sorted(
-                    list(set(self.patients).difference(validation_patients))
-                )
+                self.patients = sorted(validation_patients)
+            elif subset == "test":
+                self.patients = sorted(test_patients)
+            else:  # train
+                self.patients = sorted(train_patients)
 
         print("preprocessing {} volumes...".format(subset))
         # create list of tuples (volume, mask)
@@ -142,11 +159,15 @@ class BrainSegmentationDataset(Dataset):
         # return tensors
         return image_tensor, mask_tensor
     
+from config import global_seed as _GLOBAL_SEED
+
 def worker_init(worker_id):
-    np.random.seed(42 + worker_id)
+    base = _GLOBAL_SEED
+    np.random.seed(base + worker_id)
+    random.seed(base + worker_id)
 
 def data_loaders(batch_size, workers, image_size, aug_scale, aug_angle):
-    dataset_train, dataset_valid = datasets("./lgg-mri-segmentation/kaggle_3m", image_size, aug_scale, aug_angle)
+    dataset_train, dataset_valid, dataset_test = datasets("./lgg-mri-segmentation/kaggle_3m", image_size, aug_scale, aug_angle)
 
     loader_train = DataLoader(
         dataset_train,
@@ -163,25 +184,44 @@ def data_loaders(batch_size, workers, image_size, aug_scale, aug_angle):
         num_workers=workers,
         worker_init_fn=worker_init,
     )
+    loader_test = DataLoader(
+        dataset_test,
+        batch_size=batch_size,
+        drop_last=False,
+        num_workers=workers,
+        worker_init_fn=worker_init,
+    )
 
-    return loader_train, loader_valid
+    return loader_train, loader_valid, loader_test
 
 
 def datasets(images, image_size, aug_scale, aug_angle):
+    from config import val_count, test_count, global_seed
     train = BrainSegmentationDataset(
         images_dir=images,
         subset="train",
         image_size=image_size,
         transform=transforms(scale=aug_scale, angle=aug_angle, flip_prob=0.5),
+        val_count=val_count, test_count=test_count, global_seed=global_seed,
+        seed=global_seed,
     )
     valid = BrainSegmentationDataset(
         images_dir=images,
         subset="validation",
         image_size=image_size,
         random_sampling=False,
+        val_count=val_count, test_count=test_count, global_seed=global_seed,
+        seed=global_seed,
     )
-    return train, valid
-
+    test = BrainSegmentationDataset(
+        images_dir=images,
+        subset="test",
+        image_size=image_size,
+        random_sampling=False,
+        val_count=val_count, test_count=test_count, global_seed=global_seed,
+        seed=global_seed,
+    )
+    return train, valid, test
 
 def crop_sample(x):
     volume, mask = x
@@ -265,7 +305,6 @@ def transforms(scale=None, angle=None, flip_prob=None):
         transform_list.append(HorizontalFlip(flip_prob))
 
     return Compose(transform_list)
-
 
 
 class Scale(object):
