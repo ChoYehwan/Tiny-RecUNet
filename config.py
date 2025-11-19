@@ -2,16 +2,15 @@ import datetime
 
 hyperparameter_tuning = True
 # Random search configuration 
-tuning_trials = 2
+tuning_trials = 10
+
+model_name = "SwinUnet"
+exp_name = model_name + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # Weights & Biases
 wandb_project = "TRMUnet"  # your W&B project name
 wandb_entity = "choyh0909-handong-global-university"          # set to your W&B entity/org or keep None
-wandb_tags = []             # e.g., [model_name]
-
-
-model_name = "SwinUnet"
-exp_name = model_name + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+wandb_tags = [model_name]             # e.g., [model_name]
 
 batch_size = 16
 epochs = 50
