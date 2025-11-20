@@ -8,9 +8,9 @@ model_name = "SwinUnet"
 exp_name = model_name + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # Weights & Biases
-wandb_project = "TRMUnet"  # your W&B project name
-wandb_entity = "choyh0909-handong-global-university"          # set to your W&B entity/org or keep None
-wandb_tags = [model_name]             # e.g., [model_name]
+wandb_project = "AICONV_FINAL"  
+wandb_entity = "TRMUNet"   
+wandb_tags = [model_name]          
 
 batch_size = 16
 epochs = 50
@@ -32,7 +32,6 @@ model_args = {
     "UNet": {
         "in_channels": 3,
         "out_channels": 1,
-
     },
     "TransUnet": {
         "in_channels": 3,
@@ -51,11 +50,11 @@ model_args = {
     },
     "SwinUnet": {
         "in_channels": 3,
-        "out_channels": 1,   
+        "out_channels": 1,
         "patch_size": 4,
         "embed_dim": 96,
-        "depths": [2, 2, 6, 2],
-        "decoder_depths": [2, 2, 6, 2],
+        "depths": [2, 2, 6, 2],              # encoder stage depths
+        "decoder_depths": [2, 2, 6, 2],      # coupled to depths; tuning only 'depths'
         "num_heads": [3, 6, 12, 24],
         "window_size": 7,
         "mlp_ratio": 4.0,
@@ -64,19 +63,20 @@ model_args = {
         "ape": False,
         "patch_norm": True,
         "final_upsample": "expand_first",
+        # explicit defaults for advanced regularization (tunable)
+        "drop_rate": 0.0,
+        "attn_drop_rate": 0.0,
+        "drop_path_rate": 0.1,
     }
 }
 
-# Define tunable parameter names for generic overriding from wandb.config
-# Central sweep space (ranges/choices). If left empty {} only a single run happens.
+
 sweep_space = {
     # Global training hyperparameters can repeat in each model section if desired
     "TransUnet": {
         # Continuous ranges (random strategy only): lr log-uniform, aug_scale uniform, aug_angle int uniform, embed_dropout uniform
         "lr": {"log_uniform": [1e-5, 1e-3]},
         "batch_size": {"values": [8, 16]},  # discrete
-        "aug_scale": {"uniform": [0.0, 0.10]},
-        "aug_angle": {"int_uniform": [0, 25]},
         "embed_dim": {"values": [128, 256]},
         "depth": {"values": [4, 6]},
         "num_heads": {"values": [4, 8]},
@@ -88,22 +88,31 @@ sweep_space = {
     "SwinUnet": {
         "lr": {"log_uniform": [5e-5, 5e-4]},
         "batch_size": {"values": [8, 16]},
-        "aug_scale": {"uniform": [0.0, 0.10]},
-        "aug_angle": {"int_uniform": [0, 25]},
         "embed_dim": {"values": [96, 128]},
-        "patch_size": {"values": [4]},
-        "depths": {"values": ["2,2,6,2", "2,2,4,2"]},
-        "decoder_depths": {"values": ["2,2,6,2", "2,2,4,2"]},
-        "num_heads": {"values": ["3,6,12,24", "2,4,8,16"]},
-        "window_size": {"values": [7, 5]},
-        "final_upsample": {"values": ["expand_first", "pixelshuffle"]},
+        "patch_size": {"values": [4, 7]},
+        "depths": {"values": ["2,2,6,2", "2,2,4,2"]},  # decoder_depths mirrors this
+        # dropout-related tunables
+        "drop_rate": {"uniform": [0.0, 0.2]},
+        "attn_drop_rate": {"uniform": [0.0, 0.2]},
+        "drop_path_rate": {"uniform": [0.0, 0.3]},
     },
     # UNet (example minimal tuning)
     "UNet": {
         "lr": {"values": [1e-4, 2e-4]},
         "batch_size": {"values": [8, 16]},
-        "aug_scale": {"values": [0.0, 0.05]},
-        "aug_angle": {"values": [0, 15]},
     }
 }
 
+# SwinUnet: valid coupling between embed_dim and num_heads for attention divisibility per stage
+# The sampler uses this mapping to pick num_heads given embed_dim; we don't tune num_heads independently.
+swin_valid_heads = {
+    96:  "3,6,12,24",
+    128: "2,4,8,16",
+}
+
+# SwinUnet: valid window sizes conditioned on patch_size to reduce padding and keep windows aligned
+# Keys are patch_size, values are lists of permissible window_size values
+swin_valid_window = {
+    4: [7],       # 56x56 initial grid -> 7x7 windows tile cleanly (8 windows per side)
+    7: [4, 8],    # 32x32 grid -> 4 or 8 both divide; 4 gives more local focus, 8 fewer windows
+}
