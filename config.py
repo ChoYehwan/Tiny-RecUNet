@@ -2,7 +2,7 @@ import datetime
 
 hyperparameter_tuning = True
 # Random search configuration 
-tuning_trials = 1 
+tuning_trials = 10
 
 model_name = "SwinU_TRM"
 exp_name = model_name + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -80,11 +80,15 @@ model_args = {
         # TRM-specific decoder configuration
         "trm_depths": [0, 1, 1, 2],
         "trm_mlp_expansion": 2.0,
-        "enable_recursion": True,
+        # Always recursive now; enable_recursion removed
         "H_cycles": 3,
         "L_cycles": 6,
-        "reasoning_depth": 2, # L_layers: z_L 업데이트 시 블록 수
+        "reasoning_depth": 2,  # reasoning module depth per z_H/z_L update
         "early_stop_threshold": 0.0,
+        # Regularization defaults (added for overfitting control)
+        "drop_rate": 0.0,
+        "attn_drop_rate": 0.0,
+        "drop_path_rate": 0.1,
     }
 }
 
@@ -105,7 +109,7 @@ sweep_space = {
     "SwinUnet": {
         "lr": {"log_uniform": [1e-5, 1e-3]},
         "batch_size": {"values": [8, 16]},
-        "embed_dim": {"values": [96, 128]},
+        "embed_dim": {"values": [96, 128],},
         "patch_size": {"values": [4, 7]},
         "depths": {"values": ["2,2,6,2", "2,2,4,2"]},  # decoder_depths mirrors this
         # dropout-related tunables
@@ -121,15 +125,22 @@ sweep_space = {
     "SwinU_TRM": {
         "lr": {"log_uniform": [1e-5, 1e-3]},
         "batch_size": {"values": [8, 16]},
-        "embed_dim": {"values": [96, 128]},
+        # Capacity & structure (narrowed for overfitting mitigation)
+        "embed_dim": {"values": [96]},
         "patch_size": {"values": [4, 7]},
         "depths": {"values": ["2,2,6,2", "2,2,4,2"]},
-        "trm_depths": {"values": ["0,1,1,2", "0,1,2,2"]},
-        "trm_mlp_expansion": {"values": [1.5, 2.0, 2.5]},
+        "trm_depths": {"values": ["0,1,1,2", "0,1,1,1"]},
+        "trm_mlp_expansion": {"values": [1.25, 1.5, 2.0]},
+        # Recursion breadth
         "H_cycles": {"values": [2, 3]},
-        "L_cycles": {"values": [4, 6]},
-        "reasoning_depth": {"values": [1, 2, 3]},
-        "early_stop_threshold": {"uniform": [0.0, 0.5]},
+        "L_cycles": {"values": [4]},
+        "reasoning_depth": {"values": [1, 2]},
+        # Early stop threshold encourages shorter effective depth
+        "early_stop_threshold": {"uniform": [0.2, 0.5]},
+        # Regularization sweeps
+        "drop_rate": {"uniform": [0.0, 0.3]},
+        "attn_drop_rate": {"uniform": [0.0, 0.3]},
+        "drop_path_rate": {"uniform": [0.05, 0.35]},
         }
 }
 
