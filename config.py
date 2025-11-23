@@ -2,9 +2,9 @@ import datetime
 
 hyperparameter_tuning = True
 # Random search configuration 
-tuning_trials = 10
+tuning_trials = 1 
 
-model_name = "SwinUnet"
+model_name = "SwinU_TRM"
 exp_name = model_name + "_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # Weights & Biases
@@ -14,7 +14,7 @@ wandb_tags = [model_name]
 
 batch_size = 16
 epochs = 50
-lr = 0.0001
+lr = 0.000
 workers = 4
 weights = "./"
 image_size = 224
@@ -68,13 +68,30 @@ model_args = {
         "attn_drop_rate": 0.0,
         "drop_path_rate": 0.1,
     }
+    ,
+    "SwinU_TRM": {
+        "in_channels": 3,
+        "out_channels": 1,
+        "patch_size": 4,
+        "embed_dim": 96,
+        "depths": [2, 2, 6, 2],
+        "num_heads": [3, 6, 12, 24],
+        "window_size": 7,
+        # TRM-specific decoder configuration
+        "trm_depths": [0, 1, 1, 2],
+        "trm_mlp_expansion": 2.0,
+        "enable_recursion": True,
+        "H_cycles": 3,
+        "L_cycles": 6,
+        "reasoning_depth": 2, # L_layers: z_L 업데이트 시 블록 수
+        "early_stop_threshold": 0.0,
+    }
 }
 
 
 sweep_space = {
     # Global training hyperparameters can repeat in each model section if desired
     "TransUnet": {
-        # Continuous ranges (random strategy only): lr log-uniform, aug_scale uniform, aug_angle int uniform, embed_dropout uniform
         "lr": {"log_uniform": [1e-5, 1e-3]},
         "batch_size": {"values": [8, 16]},  # discrete
         "embed_dim": {"values": [128, 256]},
@@ -86,7 +103,7 @@ sweep_space = {
         "patch_grid": {"values": ["None", "14,14"]},
     },
     "SwinUnet": {
-        "lr": {"log_uniform": [5e-5, 5e-4]},
+        "lr": {"log_uniform": [1e-5, 1e-3]},
         "batch_size": {"values": [8, 16]},
         "embed_dim": {"values": [96, 128]},
         "patch_size": {"values": [4, 7]},
@@ -96,11 +113,24 @@ sweep_space = {
         "attn_drop_rate": {"uniform": [0.0, 0.2]},
         "drop_path_rate": {"uniform": [0.0, 0.3]},
     },
-    # UNet (example minimal tuning)
+    # UNet
     "UNet": {
-        "lr": {"values": [1e-4, 2e-4]},
+        "lr": {"log_uniform": [1e-5, 1e-3]},
         "batch_size": {"values": [8, 16]},
-    }
+    },
+    "SwinU_TRM": {
+        "lr": {"log_uniform": [1e-5, 1e-3]},
+        "batch_size": {"values": [8, 16]},
+        "embed_dim": {"values": [96, 128]},
+        "patch_size": {"values": [4, 7]},
+        "depths": {"values": ["2,2,6,2", "2,2,4,2"]},
+        "trm_depths": {"values": ["0,1,1,2", "0,1,2,2"]},
+        "trm_mlp_expansion": {"values": [1.5, 2.0, 2.5]},
+        "H_cycles": {"values": [2, 3]},
+        "L_cycles": {"values": [4, 6]},
+        "reasoning_depth": {"values": [1, 2, 3]},
+        "early_stop_threshold": {"uniform": [0.0, 0.5]},
+        }
 }
 
 # SwinUnet: valid coupling between embed_dim and num_heads for attention divisibility per stage

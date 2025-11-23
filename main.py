@@ -139,9 +139,42 @@ def train_validate(run_overrides=None, run_tag=""):
         for key, val in run_overrides.items():
             if key in base_args:
                 base_args[key] = parse_value(val, base_args[key])
+    # Coupling: For SwinUnet, keep decoder_depths identical to depths (tune only depths)
+    if local_model_name == "SwinUnet":
+        if "depths" in base_args:
+            base_args["decoder_depths"] = list(base_args["depths"]) if isinstance(base_args["depths"], (list, tuple)) else base_args["depths"]
+
+    # Swin family sanity: ensure channels divisible by heads per stage
+    def _assert_swin_heads_compat(args_dict):
+        if local_model_name not in ("SwinUnet", "SwinU_TRM"):
+            return
+        try:
+            embed = int(args_dict.get("embed_dim", 96))
+            depths_local = args_dict.get("depths", (2, 2, 6, 2))
+            heads = args_dict.get("num_heads", (3, 6, 12, 24))
+            # normalize types
+            if isinstance(depths_local, list):
+                depths_local = tuple(depths_local)
+            if isinstance(heads, list):
+                heads = tuple(heads)
+            # length check (use min length to be tolerant)
+            L = min(len(depths_local), len(heads))
+            for i in range(L):
+                C_i = embed * (2 ** i)
+                h_i = int(heads[i])
+                if C_i % h_i != 0:
+                    raise ValueError(
+                        f"Invalid {local_model_name} config: stage {i} channels {C_i} not divisible by num_heads {h_i}. "
+                        f"Try compatible heads (e.g., for embed_dim={embed}: [2,4,8,16] or ensure each C_i divisible by heads_i)."
+                    )
+        except Exception as e:
+            # Re-raise with context
+            raise
 
     # Instantiate and log parameter count
     ModelClass = model_dict[local_model_name]
+    # Validate Swin heads compatibility before building model
+    _assert_swin_heads_compat(base_args)
     model = ModelClass(**base_args)
     param_count = sum(p.numel() for p in model.parameters())
     print(f"[Run {run_tag}] Param count: {param_count}")
@@ -445,12 +478,126 @@ if __name__ == "__main__":
             attempts = 0
             max_attempts = trials * 10
             keys_order = list(model_space.keys())
+            # For SwinUnet, restrict sampling to valid (embed_dim, num_heads) pairs
+            try:
+                from config import swin_valid_heads as _swin_valid_heads_map
+                # ensure integer keys
+                swin_valid_heads = {int(k): v for k, v in _swin_valid_heads_map.items()}
+            except Exception:
+                swin_valid_heads = {96: "3,6,12,24", 128: "2,4,8,16"}
+            # And restrict window_size choices based on patch_size when provided
+            try:
+                from config import swin_valid_window as _swin_valid_window_map
+                swin_valid_window = {int(k): list(v) for k, v in _swin_valid_window_map.items()}
+            except Exception:
+                swin_valid_window = {2: [7, 14], 4: [7], 7: [4, 8]}
+            swin_embed_choices = None
+            if model_name in ("SwinUnet", "SwinU_TRM"):
+                # if embed_dim has a provided discrete list, respect it, otherwise default to keys of map
+                embed_spec = model_space.get("embed_dim")
+                if isinstance(embed_spec, dict) and 'values' in embed_spec:
+                    swin_embed_choices = [int(v) for v in embed_spec['values']]
+                else:
+                    swin_embed_choices = list(swin_valid_heads.keys())
+                # ensure choices are valid keys in the map
+                swin_embed_choices = [e for e in swin_embed_choices if e in swin_valid_heads]
+                # we will sample other keys excluding embed_dim/num_heads/window_size/patch_size directly (handled specially)
+                keys_order_wo_embed_heads = [k for k in keys_order if k not in ("embed_dim", "num_heads", "window_size", "patch_size")]
+            # helper: build merged args and validate Swin heads compatibility
+            def _merge_and_valid(attempt_overrides):
+                try:
+                    base = dict(model_args[model_name])
+                    # lightweight parser for common types
+                    def _parse_like_base(key, val):
+                        if key not in base:
+                            return val
+                        orig = base[key]
+                        if isinstance(orig, (int, float)):
+                            try:
+                                return type(orig)(val)
+                            except Exception:
+                                return orig
+                        if isinstance(orig, (list, tuple)):
+                            if isinstance(val, (list, tuple)):
+                                return list(val) if isinstance(orig, list) else tuple(val)
+                            if isinstance(val, str):
+                                txt = val.strip().replace('[','').replace(']','').replace('(','').replace(')','')
+                                parts = [p.strip() for p in txt.split(',') if p.strip()]
+                                parsed = []
+                                for p in parts:
+                                    try:
+                                        parsed.append(int(p))
+                                    except Exception:
+                                        try:
+                                            parsed.append(float(p))
+                                        except Exception:
+                                            parsed.append(p)
+                                return list(parsed) if isinstance(orig, list) else tuple(parsed)
+                        return val
+                    for k, v in attempt_overrides.items():
+                        base[k] = _parse_like_base(k, v)
+                    # Swin heads divisibility check
+                    if model_name in ("SwinUnet", "SwinU_TRM"):
+                        embed = int(base.get("embed_dim", 96))
+                        heads = base.get("num_heads", (3,6,12,24))
+                        depths_local = base.get("depths", (2,2,6,2))
+                        if isinstance(heads, list): heads = tuple(heads)
+                        if isinstance(depths_local, list): depths_local = tuple(depths_local)
+                        L = min(len(depths_local), len(heads))
+                        for i in range(L):
+                            C_i = embed * (2 ** i)
+                            h_i = int(heads[i])
+                            if C_i % h_i != 0:
+                                return None  # invalid combo
+                    return base
+                except Exception:
+                    return None
             while len(runs) < trials and attempts < max_attempts:
                 attempt = {}
-                for k in keys_order:
-                    spec = model_space[k]
-                    if isinstance(spec, dict):
-                        attempt[k] = sample_param(spec)
+                if model_name in ("SwinUnet", "SwinU_TRM"):
+                    # choose a valid embed_dim and its matching heads
+                    if not swin_embed_choices:
+                        # fallback: if none available, default to 96
+                        chosen_embed = 96
+                    else:
+                        chosen_embed = rng.choice(swin_embed_choices)
+                    attempt["embed_dim"] = chosen_embed
+                    attempt["num_heads"] = swin_valid_heads[chosen_embed]
+                    # sample patch_size first (if specified), then window_size based on mapping
+                    patch_spec = model_space.get("patch_size")
+                    if isinstance(patch_spec, dict):
+                        chosen_patch = sample_param(patch_spec)
+                    else:
+                        chosen_patch = model_args[model_name].get("patch_size", 4)
+                    # coerce to int
+                    try:
+                        chosen_patch = int(chosen_patch)
+                    except Exception:
+                        chosen_patch = 4
+                    attempt["patch_size"] = chosen_patch
+                    # decide window_size by mapping; fallback to default 7
+                    if chosen_patch in swin_valid_window and len(swin_valid_window[chosen_patch]) > 0:
+                        attempt["window_size"] = rng.choice(swin_valid_window[chosen_patch])
+                    else:
+                        # If sweep specified window_size independently, respect it; else default
+                        win_spec = model_space.get("window_size")
+                        attempt["window_size"] = sample_param(win_spec) if isinstance(win_spec, dict) else model_args[model_name].get("window_size", 7)
+
+                    # sample remaining keys normally
+                    for k in keys_order_wo_embed_heads:
+                        spec = model_space[k]
+                        if isinstance(spec, dict):
+                            attempt[k] = sample_param(spec)
+                else:
+                    for k in keys_order:
+                        spec = model_space[k]
+                        if isinstance(spec, dict):
+                            attempt[k] = sample_param(spec)
+                # validate attempt for SwinUnet (skip incompatible head/channel combos)
+                merged = _merge_and_valid(attempt)
+                if merged is None:
+                    attempts += 1
+                    continue
                 if not has_continuous:
                     sig = tuple(attempt[k] for k in keys_order)
                     if sig in seen:
