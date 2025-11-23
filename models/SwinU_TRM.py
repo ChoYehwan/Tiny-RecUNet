@@ -1,16 +1,33 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from models.swin_sys import SwinTransformerSys, PatchExpand, FinalPatchExpand_X4
 
 class SwinEncoder(nn.Module):
-    """Swin Transformer encoder that outputs bottleneck and skip connection features."""
+    """Swin Transformer encoder that outputs bottleneck and skip connection features.
+    Exposes drop_rate, attn_drop_rate, drop_path_rate to allow sweep regularization."""
     def __init__(self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, depths=(2,2,6,2),
-        num_heads=(3,6,12,24), window_size=7, out_channels=1):
+                 num_heads=(3,6,12,24), window_size=7, out_channels=1,
+                 drop_rate=0.0, attn_drop_rate=0.0, drop_path_rate=0.1):
         super().__init__()
-        self.backbone = SwinTransformerSys(img_size=img_size, patch_size=patch_size, in_chans=in_chans,
-            num_classes=out_channels, embed_dim=embed_dim, depths=list(depths), num_heads=list(num_heads),
-            window_size=window_size, mlp_ratio=4.0, qkv_bias=True, drop_rate=0.0, attn_drop_rate=0.0,
-            drop_path_rate=0.1, norm_layer=nn.LayerNorm, ape=False, patch_norm=True, use_checkpoint=False
+        self.backbone = SwinTransformerSys(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=in_chans,
+            num_classes=out_channels,
+            embed_dim=embed_dim,
+            depths=list(depths),
+            num_heads=list(num_heads),
+            window_size=window_size,
+            mlp_ratio=4.0,
+            qkv_bias=True,
+            drop_rate=drop_rate,
+            attn_drop_rate=attn_drop_rate,
+            drop_path_rate=drop_path_rate,
+            norm_layer=nn.LayerNorm,
+            ape=False,
+            patch_norm=True,
+            use_checkpoint=False,
         )
         self.img_size = img_size
         self.patch_size = patch_size
@@ -42,8 +59,8 @@ class SwiGLU(nn.Module):
         self.proj = nn.Linear(dim, inner * 2, bias=False)
         self.out = nn.Linear(inner, dim, bias=False)
     def forward(self, x):
-        a,b = self.proj(x).chunk(2, dim=-1)
-        return self.out(torch.silu(a) * b)
+        a, b = self.proj(x).chunk(2, dim=-1)
+        return self.out(F.silu(a) * b)
     
 class Attention(nn.Module):
     def __init__(self, dim, num_heads):
@@ -148,7 +165,11 @@ class TRMDecoder(nn.Module):
 
         for idx in range(1, self.num_layers):
             enc_dim = self.stage_dims_rev[idx]
-            skip_original_dim = self.stage_dims[idx-1]
+            # Map decoder stage idx to corresponding encoder skip index (mirror logic used in forward):
+            # In forward we use enc_skip_index = self.num_layers - 1 - (stage_idx + 1)
+            # Here stage_idx == idx - 1, so:
+            enc_skip_index = self.num_layers - 1 - idx
+            skip_original_dim = self.stage_dims[enc_skip_index]
             self.skip_proj.append(nn.Linear(skip_original_dim, enc_dim, bias=False))
             self.concat_proj.append(nn.Linear(enc_dim + enc_dim, enc_dim, bias=False))
             blocks = nn.ModuleList([
@@ -249,7 +270,7 @@ class SwinU_TRM(nn.Module):
     def __init__(self,
                  img_size=224,
                  patch_size=4,
-                 in_chans=3,
+                 in_channels=3,
                  out_channels=1,
                  embed_dim=96,
                  depths=(2,2,6,2),
@@ -257,26 +278,32 @@ class SwinU_TRM(nn.Module):
                  window_size=7,
                  trm_depths=(0,1,1,2),
                  trm_mlp_expansion=2.0,
-                 enable_recursion=False,
                  H_cycles=3,
                  L_cycles=6,
                  reasoning_depth=2,
-                 early_stop_threshold=0.0):
+                 early_stop_threshold=0.0,
+                 drop_rate=0.0,
+                 attn_drop_rate=0.0,
+                 drop_path_rate=0.1):
         super().__init__()
-        self.enable_recursion = enable_recursion
         self.H_cycles = H_cycles
         self.L_cycles = L_cycles
         self.reasoning_depth = reasoning_depth
         self.early_stop_threshold = early_stop_threshold
         deepest_dim = embed_dim * (2 ** (len(depths) - 1))
-        self.encoder = SwinEncoder(img_size=img_size,
-                                    patch_size=patch_size,
-                                    in_chans=in_chans,
-                                    embed_dim=embed_dim,
-                                    depths=depths,
-                                    num_heads=num_heads,
-                                    window_size=window_size,
-                                    out_channels=out_channels)
+        self.encoder = SwinEncoder(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_chans=in_channels,
+            embed_dim=embed_dim,
+            depths=depths,
+            num_heads=num_heads,
+            window_size=window_size,
+            out_channels=out_channels,
+            drop_rate=drop_rate,
+            attn_drop_rate=attn_drop_rate,
+            drop_path_rate=drop_path_rate,
+        )
         self.decoder = TRMDecoder(embed_dim=embed_dim,
                                    depths=depths,
                                    trm_depths=trm_depths,
@@ -296,18 +323,10 @@ class SwinU_TRM(nn.Module):
         self.q_head = nn.Linear(deepest_dim, 2)
 
     def forward(self, x):
-        if not self.enable_recursion:
-            bottleneck_X, skip_X_list = self.encoder(x)
-            seg_prob, _ = self.decoder(bottleneck_X, skip_X_list)
-            return seg_prob
-        seg_probs, _, _ = self.forward_recursive(x, return_all=False)
-        return seg_probs[-1]
+        seg_prob, _, _ = self.forward_recursive(x, return_all=False)
+        return seg_prob
 
     def forward_with_logits(self, x):
-        if not self.enable_recursion:
-            bottleneck_X, skip_X_list = self.encoder(x)
-            seg_prob, seg_logits = self.decoder(bottleneck_X, skip_X_list)
-            return seg_prob, seg_logits
         seg_probs, seg_logits_list, _ = self.forward_recursive(x, return_all=True)
         return seg_probs[-1], seg_logits_list[-1]
 
@@ -327,6 +346,7 @@ class SwinU_TRM(nn.Module):
                 # optional early stop
                 q_logits = self.q_head(z_H[:,0])  # (B,2)
                 halt_prob = torch.sigmoid(q_logits[:,0])
+                q_hats.append(halt_prob.unsqueeze(1))
                 if self.early_stop_threshold > 0 and halt_prob.mean().item() > self.early_stop_threshold:
                     break
         # Final cycle with grad
@@ -338,5 +358,9 @@ class SwinU_TRM(nn.Module):
         seg_probs.append(seg_prob)
         seg_logits_list.append(seg_logits)
         q_logits = self.q_head(z_H[:,0])
-        q_hats.append(torch.sigmoid(q_logits[:,0:1]))  # return halt prob
-        return (seg_probs, seg_logits_list, q_hats) 
+        q_hats.append(torch.sigmoid(q_logits[:,0:1]))  # final halt prob
+
+        if return_all:
+            return seg_probs, seg_logits_list, q_hats
+        else:
+            return seg_probs[-1], seg_logits_list[-1], q_hats[-1]
